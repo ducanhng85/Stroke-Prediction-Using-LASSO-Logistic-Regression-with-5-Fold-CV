@@ -1,0 +1,275 @@
+---
+title: 'Project Presentation #2'
+author: "Duc Nguyen"
+date: "2025-03-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### I. Load dataset
+
+```{R}
+data <- read.csv("/Users/bebexmimi/Downloads/healthcare-dataset-stroke-data.csv")
+head(data)
+```
+### II. Exploratory Data Analysis (EDA)
+
+```{r}
+library(tidyverse)
+library(caret)
+library(dplyr)
+library(GGally)
+```
+
+```{r}
+str(data)
+```
+```{r}
+data$bmi[data$bmi == "NA"] <- NA  
+data$bmi <- as.numeric(data$bmi)
+
+```
+```{r}
+sum(is.na(data$bmi)) 
+```
+
+```{r}
+data$bmi[is.na(data$bmi)] <- mean(data$bmi, na.rm = TRUE)
+```
+
+```{r}
+summary(data)  
+```
+
+```{r}
+data <- select(data, -id) # Drop 'id' column as it is a unique identifier and does not contribute to prediction
+```
+
+
+```{r}
+num_data <- data %>% select_if(is.numeric)
+```
+
+
+```{r}
+ggpairs(data, columns = c("age", "avg_glucose_level", "bmi", "stroke"),
+        aes(color = as.factor(stroke)))
+```
+
+```{r}
+library(corrplot)
+
+```
+
+```{r}
+cor_matrix <- cor(num_data)
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black")
+```
+From the heatmap, it's evident that most features exhibit minimal correlation with one another, making them well-suited for regression. Among all features, age shows the strongest correlation with stroke.
+
+### III. Model Selection Methods
+
+```{r}
+library(leaps)
+
+```
+
+```{r}
+set.seed(1)
+idx <- createDataPartition(data$stroke, p=0.6, list=FALSE)
+train.df <- data[idx, ]
+holdout.df <- data[-idx, ]
+```
+
+#### Best Subset Selection (Cp)
+
+```{r}
+regfit <- regsubsets(stroke ~ ., data = train.df, nvmax = 10)
+subset_summary <- summary(regfit)
+results <- tibble(
+  Size = 1:10,
+  Adj_R2 = subset_summary$adjr2,
+  Cp = subset_summary$cp,
+  BIC = subset_summary$bic
+)
+results
+```
+
+Adjusted R² increases as more predictors are added, peaking at 10 predictors (0.088). However, the improvement becomes marginal beyond 6 predictors (0.08499), suggesting diminishing returns. The best trade-off is typically where Adjusted R² stabilizes, which appears to be around 6 predictors.
+
+Mallows' Cp values decrease with model complexity, indicating improved fit. A Cp value close to the number of predictors suggests an optimal model, and the 6-predictor model (Cp = 11.72) stands out as a strong candidate. This balance suggests it adequately captures variability without unnecessary complexity.
+
+BIC (Bayesian Information Criterion) favors model simplicity, reaching its lowest value at 5 predictors (-223.14). This suggests the 5-predictor model is the best fit while avoiding overfitting. Beyond this point, BIC increases, indicating that adding more predictors may introduce unnecessary complexity.
+
+#### Forward Selection Using AIC
+
+```{r}
+forward_aic <- step(lm(stroke ~ 1, data = train.df), 
+                    scope = list(lower = ~1, upper = ~.), 
+                    direction = "forward", k = 2)  
+summary(forward_aic)
+```
+
+#### Backward Elimination Using AIC
+
+```{r}
+backward_aic <- step(lm(stroke ~ ., data = train.df), 
+                     direction = "backward", k = 2)
+summary(backward_aic)
+
+```
+
+#### Stepwise Selection Using AIC
+
+```{r}
+stepwise_aic <- step(lm(stroke ~., data = train.df), 
+                     scope = list(lower = ~1, upper = ~.), 
+                     direction = "both", k = 2)
+summary(stepwise_aic)
+```
+
+The stepwise selection method, like backward elimination, retains the same significant predictors, including age, hypertension, heart disease, work type, and avg glucose level, while excluding BMI and Never worked. This suggests that stepwise selection agrees with backward elimination in terms of the most important predictors.
+
+The model's explanatory power (R-squared = 9%) remains low, suggesting potential for improvement, perhaps by considering additional variables or more complex modeling techniques.
+
+### IV. Regularization and Cross-Validation
+
+```{r}
+library(glmnet)
+library(caret)
+library(pROC)
+```
+
+```{R}
+set.seed(456)
+
+X_stroke <- model.matrix(stroke ~ ., data)[, -1]
+y_stroke <- as.numeric(data$stroke)
+
+# Custom function to compute AUC for a given lambda across 5-fold CV
+auc_cv <- function(lambda, x, y, folds) {
+  pred <- numeric(length(y))
+  for (i in unique(folds)) {
+    train_idx <- which(folds != i)
+    test_idx <- which(folds == i)
+    fit <- glmnet(x[train_idx, ], y[train_idx], family = "binomial", alpha = 1, lambda = lambda)
+    pred[test_idx] <- predict(fit, newx = x[test_idx, ], s = lambda, type = "response")
+  }
+  roc_obj <- roc(y, pred)
+  auc(roc_obj)
+}
+
+# Perform 5-fold CV to tune lambda based on AUC
+set.seed(789)
+folds <- createFolds(y_stroke, k = 5, list = FALSE)
+
+# Generate a grid of lambda values from cv.glmnet
+lambda_grid <- cv.glmnet(X_stroke, y_stroke, family = "binomial", alpha = 1, nfolds = 5)$lambda
+auc_values <- sapply(lambda_grid, auc_cv, x = X_stroke, y = y_stroke, folds = folds)
+
+# Select the lambda value that gives the maximum AUC
+best_lambda_auc <- lambda_grid[which.max(auc_values)]
+
+# Run cv.glmnet with the best lambda for LASSO (alpha = 1)
+cv_lasso_log <- cv.glmnet(X_stroke, y_stroke, family = "binomial", alpha = 1, nfolds = 5)
+
+# Print the model coefficients at the best lambda value
+lasso_coefs <- coef(cv_lasso_log, s = best_lambda_auc)
+print(lasso_coefs)
+```
+The logistic regression model shows that age, hypertension, heart disease, and average glucose level are significant factors in predicting stroke risk. As age increases, the likelihood of having a stroke also increases. Both hypertension and heart disease raise the risk, while glucose levels have a small positive effect. Other variables like gender, work type, and smoking status were excluded from the model, indicating they are less important in predicting stroke risk.
+
+```{R}
+preds <- predict(cv_lasso_log, X_stroke, s = best_lambda_auc, type = "response")
+lasso_logistic_class <- ifelse(preds > 0.5, 1, 0)
+
+# Convert both predictions and true labels to factors with the same levels
+lasso_logistic_class <- factor(lasso_logistic_class, levels = c(0, 1))
+actual_class <- factor(y_stroke, levels = c(0, 1))
+
+# Now create the confusion matrix
+conf_matrix <- confusionMatrix(lasso_logistic_class, actual_class)
+print(conf_matrix$table)
+```
+
+True Negatives (TN): 4861 – The model correctly predicted no stroke (negative class) for 4861 instances.
+
+False Positives (FP): 249 – The model incorrectly predicted a stroke (positive class) when there was none for 249 instances.
+
+False Negatives (FN): 0 – The model did not miss any actual stroke cases (there were no false negatives).
+
+True Positives (TP): 0 – The model did not correctly predict any stroke cases (there were no true positives).
+
+```{R}
+sensitivity <- conf_matrix$byClass["Sensitivity"]
+specificity <- conf_matrix$byClass["Specificity"]
+roc_curve <- roc(y_stroke, preds)
+auc_val <- auc(roc_curve)
+
+cat("Best Lambda for LASSO Logistic (AUC):", best_lambda_auc, "\n")
+```
+
+```{r}
+cat("Sensitivity:", sensitivity, " Specificity:", specificity, " AUC:", auc_val, "\n")
+
+```
+
+Sensitivity is 0, which means the model is not detecting any positive cases (stroke). This is problematic, especially in medical predictions.
+
+Specificity is 0.9503, which shows that the model is very good at identifying negative cases (no stroke).
+
+The AUC of 0.8439 suggests the model has a good ability to discriminate between classes, but improvements are needed to improve sensitivity (detection of strokes).
+
+```{r}
+plot(roc_curve, main = "ROC Curve for LASSO Logistic Regression")
+
+```
+
+### V. Model Performance Evaluation
+
+1. Compare different model selection methods and justify the final model choice.
+
+- Best Subset Selection:
+
+Adjusted R² increases with the addition of more predictors, peaking at 10 predictors (Adjusted R² = 0.088). However, the increase becomes marginal after 6 predictors (Adjusted R² = 0.08499), suggesting diminishing returns. The 6-predictor model strikes the best trade-off between explanatory power and complexity.
+
+Mallows’ Cp: For the 6-predictor model (Cp = 11.72), this indicates a good fit with minimal complexity. The 6-predictor model provides an effective balance between model performance and complexity.
+
+BIC (Bayesian Information Criterion): BIC reaches its lowest value at 5 predictors (-223.14), indicating that the 5-predictor model offers the best balance between fit and simplicity. Adding more predictors beyond this point results in higher BIC values, indicating unnecessary complexity.
+
+- Stepwise Selection (Forward, Backward, and Mixed):
+
+Both the stepwise selection and backward elimination methods align in identifying the most important predictors. In the Forward AIC method, the model initially only includes the intercept, which is highly significant, meaning the model does not yet include any predictors. The intercept's statistical reliability suggests a solid foundation, but additional predictors must be added in subsequent steps of the forward selection process to build a more meaningful predictive model.
+
+The R-squared value of 9% indicates that the model explains a modest portion of the variability, leaving room for improvement, possibly through additional predictors or more advanced modeling techniques.
+
+- Lasso Logistic Regression with Cross-Validation:
+
+Cross-validation was employed for Lasso logistic regression, which played a crucial role in selecting the final model. Lasso not only helps with variable selection by penalizing the inclusion of less important predictors but also regularizes the model to avoid overfitting. Cross-validation ensures that the model is evaluated across different subsets of the data, providing a robust estimate of its performance and enhancing its ability to generalize to new data.
+
+The Lasso model retained the following significant predictors: age, hypertension, heart disease, and average glucose level. These predictors were deemed essential for predicting stroke risk. Other variables like gender, work type, BMI, and smoking status were excluded from the model, indicating that they did not contribute meaningfully to stroke prediction after regularization.
+
+- Justification for the Final Model:
+
+The final model choice is justified by combining the results from best subset selection, stepwise selection, and Lasso logistic regression with cross-validation. The 6-predictor model provides a good balance between model complexity and fit, as indicated by the Adjusted R² and Mallows' Cp. Lasso logistic regression helps refine the model by penalizing less important predictors, and its use of cross-validation ensures robustness and mitigates overfitting. The final model, which includes age, hypertension, heart disease, and average glucose level, effectively predicts stroke risk while maintaining generalizability.
+
+
+2. Discuss potential overfitting issues and how cross-validation helps mitigate them.
+
+
+Overfitting occurs when a model learns not only the true underlying patterns in the data but also the noise and random fluctuations, leading to excellent performance on the training data but poor generalization to new, unseen data. In this case, overfitting might happen if the model is too complex, incorporating too many predictors or overemphasizing certain features, leading to high specificity but zero sensitivity (failing to detect any positive cases like strokes).
+
+Cross-validation helps mitigate overfitting by splitting the dataset into multiple folds, training the model on one subset, and validating it on another. This process ensures that the model is evaluated on data it hasn't seen before, providing a more reliable estimate of its performance. By using cross-validation, you can assess the model's ability to generalize and adjust it accordingly to prevent overfitting. It also allows for fine-tuning the model's parameters and regularization techniques to strike the right balance between bias and variance, ensuring that the model performs well both on training and unseen data.
+
+3. Present key takeaways from the model selection process.
+
+Model Complexity vs. Fit: A balance between model complexity and fit is crucial. The 6-predictor model, identified through best subset selection and Mallows' Cp, provides an optimal balance, capturing variability without overcomplicating the model.
+
+Importance of Cross-Validation: Cross-validation ensures the model generalizes well, preventing overfitting and improving its robustness by evaluating its performance on different data subsets.
+
+Variable Selection: Techniques like Lasso and stepwise selection identified key predictors (e.g., age, hypertension, heart disease, and glucose levels) as significant, while reducing noise by excluding irrelevant variables.
+
+Model Performance: The model demonstrated good discrimination with an AUC of 0.8439, but sensitivity improvements are necessary, highlighting the importance of fine-tuning for detecting positive cases (strokes).
